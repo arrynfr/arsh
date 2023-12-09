@@ -2,14 +2,15 @@ use syscalls::{Sysno, syscall};
 use std::io::{self, BufRead};
 use std::io::Write;
 use std::ffi::{CString, c_char};
+use std::env;
+use std::ptr;
+
 
 const HELP_TEXT: &str = "arsh shell
 copyright 2023 arrynfr
 
 Available builtin commands:
 cd          help";
-
-const PATH: [&str;2] = ["/usr/bin","/bin"];
 
 fn change_directory(path: String) {
     let c_path: CString = CString::new(path.as_str()).unwrap();
@@ -36,9 +37,16 @@ fn execute_program(cmd: &str, argv: Vec::<&str>) {
             for arg in argv {
                 c_argv.push(CString::new(arg).unwrap());
             }
-            let c_args = c_argv.iter().map(|arg| arg.as_ptr()).collect::<Vec<*const c_char>>();
+            let c_argv = c_argv.iter().map(|arg| arg.as_ptr()).chain([ptr::null()]).collect::<Vec<*const c_char>>();
+
+            let mut c_envp = Vec::new();
+            for (key,val) in  env::vars() {
+                let env_str = format!("{key}={val}");
+                c_envp.push(CString::new(env_str).unwrap());
+            }
+            let c_envp = c_envp.iter().map(|arg| arg.as_ptr()).chain([ptr::null()]).collect::<Vec<*const c_char>>();
             
-            match unsafe { syscall!(Sysno::execve, c_cmd.as_ptr(), c_args.as_ptr(), 0) } {
+            match unsafe { syscall!(Sysno::execve, c_cmd.as_ptr(), c_argv.as_ptr(), c_envp.as_ptr()) } {
                 Ok(_none) => {unreachable!()}
                 Err(err) => {
                     eprintln!("arsh: {} ({})", err.description()
@@ -73,6 +81,7 @@ fn main() {
                     for arg in args.to_owned() {
                         argv.push(arg);
                     }
+
                     let cmd = args.next().unwrap_or("");
                     match cmd {
                         ""      => {}
@@ -84,7 +93,7 @@ fn main() {
                         _       => {execute_program(cmd, argv)}
                     }
                 }
-                Err(err) => {eprintln!("Couldn't read line: {}", err)}
+                Err(err) => {eprintln!("Couldn't read line: {err}")}
             }
             print!("{} > ", get_cwd());
             io::stdout().flush().unwrap();
