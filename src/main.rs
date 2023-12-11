@@ -109,11 +109,14 @@ fn main() {
                         "cd"    => {    if args.clone().count() <= 1 {
                                             change_directory(args.next().unwrap_or("").to_owned())
                                         } else {eprintln!("arsh: cd: too many arguments")}
-                                    }
-                        _       =>  {
+                                   }
+			"exit"	=> {
+					std::process::exit(0);
+				   }
+                        _       => {
                                         let cmd = search_in_path(cmd);
                                         execute_program(&cmd, argv)
-                                    }
+                                   }
                     }
                 }
                 Err(err) => {eprintln!("Couldn't read line: {err}")}
