@@ -1,128 +1,177 @@
-use syscalls::{Sysno, syscall};
-use std::io::{self, BufRead};
-use std::io::Write;
-use std::ffi::{CString, c_char};
+extern crate libc;
+
+use std::alloc::System;
+use std::io::{self, Write};
+use std::ffi::CString;
 use std::env;
-use std::path::Path;
-use std::ptr;
 
-const HELP_TEXT: &str = "arsh shell
-copyright 2023 arrynfr
+#[global_allocator]
+static A: System = System;
 
-Available builtin commands:
-cd          help";
-
-fn change_directory(path: String) {
-    let c_path: CString = CString::new(path.as_str()).unwrap();
-    match unsafe { syscall!(Sysno::chdir, c_path.as_ptr()) } {
-        Err(ret) => {eprintln!("{}", ret);}
-        _ => {}
-    }
+fn set_variable(name: &str, value: &str) {
+    env::set_var(name, value);
 }
 
-fn get_cwd() -> String {
-    let current_directory = vec![0; 256];
-    unsafe {syscall!(Sysno::getcwd, current_directory.as_ptr(), current_directory.capacity())
-            .expect("Couldn't get cwd");
-    }
-    String::from_utf8(current_directory).expect("Couldn't turn cwd into String")
+fn get_variable(name: &str) -> Option<String> {
+    env::var(name).ok()
 }
 
-fn execute_program(cmd: &str, argv: Vec::<&str>) {
-    match unsafe { syscall!(Sysno::fork) } {
-        Ok(0) => {
-            // Child process
-            let c_cmd: CString = CString::new(cmd).unwrap();
-            let mut c_argv = Vec::new();
-            for arg in argv {
-                c_argv.push(CString::new(arg).unwrap());
-            }
-            let c_argv = c_argv.iter().map(|arg| arg.as_ptr()).chain([ptr::null()]).collect::<Vec<*const c_char>>();
+fn expand_variables(command: &str) -> String {
+    let mut expanded_command = String::new();
+    let mut iter = command.chars().peekable();
 
-            let mut c_envp = Vec::new();
-            for (key,val) in  env::vars() {
-                let env_str = format!("{key}={val}");
-                c_envp.push(CString::new(env_str).unwrap());
-            }
-            let c_envp = c_envp.iter().map(|arg| arg.as_ptr()).chain([ptr::null()]).collect::<Vec<*const c_char>>();
-
-            match unsafe { syscall!(Sysno::execve, c_cmd.as_ptr(), c_argv.as_ptr(), c_envp.as_ptr()) } {
-                Ok(_none) => {unreachable!()}
-                Err(err) => {
-                    eprintln!("arsh: {} ({})", err.description()
-                                                    .expect("No desciption provided"),
-                                                    err.name().expect("No name provided"));
-                    unsafe{ let _ = syscall!(Sysno::exit, err.into_raw());}
+    while let Some(ch) = iter.next() {
+        if ch == '$' {
+            if let Some(next_ch) = iter.next() {
+                if next_ch == '(' {
+                    let mut variable_name = String::new();
+                    while let Some(inner_ch) = iter.next() {
+                        if inner_ch == ')' {
+                            break;
+                        }
+                        variable_name.push(inner_ch);
+                    }
+                    if let Some(value) = get_variable(&variable_name) {
+                        expanded_command.push_str(&value);
+                    } else {
+                        eprintln!("{}Error: Variable '{}' not found{}", RED, variable_name, RESET);
+                    }
+                    continue;
                 }
             }
+            expanded_command.push(ch);
+        } else {
+            expanded_command.push(ch);
         }
-        Ok(pid) => {
-            // Parent process
-            match unsafe { syscall!(Sysno::wait4, pid, 0, 0, 0) } {
-                Err(err) => {eprintln!("{}", err);}
-                _ => {}
-            }
-        }
-        Err(err) => {
-            eprintln!("fork() failed: {}", err);
+    }
+
+    expanded_command
+}
+
+// ANSI escape codes
+const RED: &str = "\x1b[31m";
+const _GREEN: &str = "\x1b[32m";
+const _YELLOW: &str = "\x1b[33m";
+const RESET: &str = "\x1b[0m";
+
+fn change_directory(dir: &str) -> Result<(), String> {
+    unsafe {
+        let c_dir = CString::new(dir).expect("CString::new failed for directory");
+        if libc::chdir(c_dir.as_ptr()) == 0 {
+            Ok(())
+        } else {
+            Err("Failed to change directory".to_string())
         }
     }
 }
 
-fn search_in_path(cmd: &str) -> String {
-    if Path::new(cmd).exists() {
-        return cmd.to_owned();
-    }
+// Ctrl+C (SIGINT)
+extern "C" fn handle_sigint(_signo: libc::c_int) {
+    print!("\n{} > ", env::current_dir().unwrap().to_string_lossy());
+    io::stdout().flush().unwrap();
+}
 
-    let test_cmd = format!("./{cmd}");
-    if Path::new(&test_cmd).exists() {
-        return test_cmd;
-    } else {
-        let env_path = env!("PATH").split(":");
-        for p in env_path {
-            let p = format!("{p}/{cmd}");
-            if Path::new(&p).exists() {
-                return p;
-            }
-        }
+fn setup_signal_handler() {
+    unsafe {
+        libc::signal(libc::SIGINT, handle_sigint as libc::sighandler_t);
     }
-    return cmd.to_owned();
 }
 
 fn main() {
+    setup_signal_handler();
     loop {
-        print!("{} > ", get_cwd());
-        io::stdout().flush().unwrap();
-        for line in io::stdin().lock().lines() {
-            match {line} {
-                Ok(cmd) => {
-                    let mut args = cmd.split_whitespace();
-                    let mut argv = Vec::new();
-                    for arg in args.to_owned() {
-                        argv.push(arg);
-                    }
+        let current_dir = env::current_dir().unwrap();
+        let current_dir_str = current_dir.to_string_lossy();
 
-                    let cmd = args.next().unwrap_or("");
-                    match cmd {
-                        ""      => {}
-                        "help"  => {println!("{}", HELP_TEXT)}
-                        "cd"    => {    if args.clone().count() <= 1 {
-                                            change_directory(args.next().unwrap_or("").to_owned())
-                                        } else {eprintln!("arsh: cd: too many arguments")}
-                                   }
-			"exit"	=> {
-					std::process::exit(0);
-				   }
-                        _       => {
-                                        let cmd = search_in_path(cmd);
-                                        execute_program(&cmd, argv)
-                                   }
+        print!("{} > ", current_dir_str);
+        io::stdout().flush().unwrap();
+
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input).unwrap() == 0 {
+            println!("\nexit");
+            break;
+        };
+
+        let input = input.trim();
+        let input_expanded = expand_variables(input);
+
+        match input {
+            _ if input.starts_with("cd ") => {
+                match change_directory(&input[3..]) {
+                    Ok(_) => (),
+                    Err(error) => eprintln!("Error: {}", error),
+                }
+            }
+            _ if input_expanded.starts_with("set ") => {
+                let parts: Vec<&str> = input_expanded.splitn(3, ' ').collect();
+                if parts.len() == 3 {
+                    set_variable(parts[1], parts[2]);
+                } else {
+                    eprintln!("{}Error: Invalid set command{}", RED, RESET);
+                }
+            }
+            "exit" | "quit" => {
+                println!("exit");
+                break;
+            }
+            _ => {
+                if !input_expanded.is_empty() {
+                    match execute_command(&input_expanded) {
+                        Ok(output) => {
+                            let _ = output;
+                        }
+                        Err(error) => eprintln!("{}Error: {}{}", RED, error, RESET),
                     }
                 }
-                Err(err) => {eprintln!("Couldn't read line: {err}")}
             }
-            print!("{} > ", get_cwd());
-            io::stdout().flush().unwrap();
+        }
+    }
+}
+
+fn execute_command(command: &str) -> Result<String, String> {
+    // Split the command into arguments
+    let args: Vec<&str> = command.split_whitespace().collect();
+
+    // Use fork and exec to run the command
+    unsafe {
+        let child_pid = libc::fork();
+
+        match child_pid {
+            -1 => {
+                // Fork failed
+                Err("Fork failed".to_string())
+            }
+            0 => {
+                // Child process
+                let c_command = CString::new(args[0]).expect("CString::new failed for command");
+                let c_args: Vec<CString> = args.iter()
+                    .map(|&arg| CString::new(arg).expect("CString::new failed for argument"))
+                    .collect();
+                let c_args_ptrs: Vec<*const libc::c_char> = c_args.iter().map(|cstr| cstr.as_ptr()).collect();
+
+                // Add a null pointer at the end of array as per man execve
+                let mut c_args_ptrs_with_null = c_args_ptrs.clone();
+                c_args_ptrs_with_null.push(std::ptr::null());
+
+                libc::execvp(c_command.as_ptr(), c_args_ptrs_with_null.as_ptr());
+                
+                // execvp only returns if an error occurs
+                eprintln!("{}c_shell: {:?}: {:?}{}", RED, c_command, CString::from_raw(libc::strerror(*libc::__errno_location())), RESET);
+                libc::exit(1);
+            }
+            _ => {
+                // Parent process
+                let mut status: libc::c_int = 0;
+                libc::waitpid(child_pid, &mut status, 0);
+
+                if libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0 {
+                    // Child process exited successfully
+                    Ok("Command executed successfully".to_string())
+                } else {
+                    // Child process encountered an error
+                    Err("Command execution failed".to_string())
+                }
+            }
         }
     }
 }
