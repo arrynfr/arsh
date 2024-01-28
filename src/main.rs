@@ -156,7 +156,7 @@ fn execute_command(command: &str) -> Result<String, String> {
                 libc::execvp(c_command.as_ptr(), c_args_ptrs_with_null.as_ptr());
                 
                 // execvp only returns if an error occurs
-                eprintln!("{}c_shell: {:?}: {:?}{}", RED, c_command, CString::from_raw(libc::strerror(io::Error::last_os_error().raw_os_error().unwrap())), RESET);
+                eprintln!("{}arsh: {:?}: {:?}{}", RED, c_command, CString::from_raw(libc::strerror(io::Error::last_os_error().raw_os_error().unwrap())), RESET);
                 libc::exit(1);
             }
             _ => {
