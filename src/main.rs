@@ -1,12 +1,8 @@
 extern crate libc;
 
-use std::alloc::System;
 use std::io::{self, Write};
 use std::ffi::CString;
 use std::env;
-
-#[global_allocator]
-static A: System = System;
 
 fn set_variable(name: &str, value: &str) {
     env::set_var(name, value);
